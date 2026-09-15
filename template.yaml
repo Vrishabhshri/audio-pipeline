@@ -1,0 +1,167 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Serverless audio processing pipeline. S3 upload triggers metadata
+  extraction, Step Functions orchestrates transcode, waveform, and
+  notify, and a search API exposes the processed metadata.
+
+Parameters:
+  NotificationEmail:
+    Type: String
+    Description: Email address to receive pipeline completion notifications
+
+Globals:
+  Function:
+    Timeout: 30
+    MemorySize: 256
+    Runtime: python3.12
+
+Resources:
+
+  AudioBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "audio-pipeline-${AWS::AccountId}-${AWS::Region}"
+
+  AudioMetadataTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: AudioMetadata
+      AttributeDefinitions:
+        - AttributeName: fileId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: fileId
+          KeyType: HASH
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+
+  NotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: AudioPipelineNotifications
+      Subscription:
+        - Protocol: email
+          Endpoint: !Ref NotificationEmail
+
+  FfmpegLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: ffmpeg
+      ContentUri: layers/ffmpeg/
+      CompatibleRuntimes:
+        - python3.12
+      RetentionPolicy: Delete
+
+  ExtractMetadataFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: functions/metadata/
+      Handler: app.handler
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref AudioMetadataTable
+          STATE_MACHINE_ARN: !Ref AudioPipelineStateMachine
+      Policies:
+        - S3ReadPolicy:
+            BucketName: !Ref AudioBucket
+        - DynamoDBWritePolicy:
+            TableName: !Ref AudioMetadataTable
+        - StepFunctionsExecutionPolicy:
+            StateMachineName: !GetAtt AudioPipelineStateMachine.Name
+      Events:
+        UploadEvent:
+          Type: S3
+          Properties:
+            Bucket: !Ref AudioBucket
+            Events: s3:ObjectCreated:*
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: uploads/
+
+  TranscodeFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: functions/transcode/
+      Handler: app.handler
+      MemorySize: 512
+      Timeout: 60
+      Layers:
+        - !Ref FfmpegLayer
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Ref AudioBucket
+
+  WaveformFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: functions/waveform/
+      Handler: app.handler
+      MemorySize: 512
+      Timeout: 60
+      Layers:
+        - !Ref FfmpegLayer
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Ref AudioBucket
+
+  NotifyFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: functions/notify/
+      Handler: app.handler
+      Environment:
+        Variables:
+          TOPIC_ARN: !Ref NotificationTopic
+      Policies:
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt NotificationTopic.TopicName
+
+  SearchFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: functions/search/
+      Handler: app.handler
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref AudioMetadataTable
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref AudioMetadataTable
+      Events:
+        SearchApi:
+          Type: HttpApi
+          Properties:
+            Path: /search
+            Method: GET
+
+  AudioPipelineStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Name: AudioPipeline
+      DefinitionUri: statemachine/pipeline.asl.json
+      DefinitionSubstitutions:
+        TranscodeFunctionArn: !GetAtt TranscodeFunction.Arn
+        WaveformFunctionArn: !GetAtt WaveformFunction.Arn
+        NotifyFunctionArn: !GetAtt NotifyFunction.Arn
+      Policies:
+        - LambdaInvokePolicy:
+            FunctionName: !Ref TranscodeFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref WaveformFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref NotifyFunction
+
+Outputs:
+  BucketName:
+    Value: !Ref AudioBucket
+  ApiEndpoint:
+    Description: Base URL for the search endpoint
+    Value: !Sub "https://${ServerlessHttpApi}.execute-api.${AWS::Region}.amazonaws.com/search"
+  StateMachineArn:
+    Value: !Ref AudioPipelineStateMachine
+  TopicArn:
+    Value: !Ref NotificationTopic

@@ -1,0 +1,21 @@
+{
+  "Comment": "Audio processing pipeline",
+  "StartAt": "Transcode",
+  "States": {
+    "Transcode": {
+      "Type": "Task",
+      "Resource": "${TranscodeFunctionArn}",
+      "Next": "GenerateWaveform"
+    },
+    "GenerateWaveform": {
+      "Type": "Task",
+      "Resource": "${WaveformFunctionArn}",
+      "Next": "Notify"
+    },
+    "Notify": {
+      "Type": "Task",
+      "Resource": "${NotifyFunctionArn}",
+      "End": true
+    }
+  }
+}

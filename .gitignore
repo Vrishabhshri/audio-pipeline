@@ -1,0 +1,7 @@
+.aws-sam/
+layers/ffmpeg/bin/*
+!layers/ffmpeg/bin/.gitkeep
+__pycache__/
+*.pyc
+samconfig.toml
+.DS_Store
